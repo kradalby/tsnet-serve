@@ -10,10 +10,15 @@ def put(machine, path, text):
     machine.succeed(f"printf %s {shlex.quote(text)} > {path}")
 
 
-def environment(key=None, backend="8080"):
+def environment(
+    key=None,
+    backend="8080",
+    allowed_paths="^/allowed",
+    denied_paths="^/allowed/private",
+):
     text = (
         "TSNS_HOSTNAME=proxy\nTSNS_LISTEN_PORT=8443\n"
-        "TSNS_ALLOWED_PATHS=^/allowed\nTSNS_DENIED_PATHS=^/allowed/private\n"
+        f"TSNS_ALLOWED_PATHS={allowed_paths}\nTSNS_DENIED_PATHS={denied_paths}\n"
         f"TSNS_BACKEND={backend}\n"
     )
     if key:
@@ -185,6 +190,122 @@ with subtest("direct and forced-DERP HTTPS, forwarding and path permissions"):
     assert code == 60, (code, output)
     healthy(direct)
 
+with subtest("path policies block traversal before a normalizing backend"):
+    traversal_paths = (
+        "/allowed/public/../private/secret.txt",
+        "/allowed/public/%2e%2e/private/secret.txt",
+        "/allowed/public/.%2E/private/secret.txt",
+        "/allowed/public/..%2fprivate/secret.txt",
+        "/allowed/../outside.txt",
+        "/allowed/%2e%2e/outside.txt",
+        "/allowed/./private/secret.txt",
+        "/allowed/%2e/private/secret.txt",
+        "/allowed//private/secret.txt",
+    )
+    assert (
+        app.succeed(
+            "curl -fsS --path-as-is http://127.0.0.1:8080/allowed/public/../private/secret.txt"
+        )
+        == "private resource\n"
+    )
+    probes = []
+    for machine, name in ((direct, "direct"), (relay, "relay")):
+        assert (
+            machine.succeed(
+                request("/allowed/public/%68ello.txt?ref=%2e%2e", "-f --path-as-is")
+            )
+            == "allowed resource\n"
+        )
+        for index, path in enumerate(traversal_paths):
+            marker = f"traversal-{name}-{index}"
+            code = machine.succeed(
+                request(
+                    f"{path}?probe={marker}",
+                    "--path-as-is -o /tmp/traversal-body -w '%{http_code}'",
+                )
+            )
+            probes.append(
+                (path, marker, code, machine.succeed("cat /tmp/traversal-body"))
+            )
+        marker = f"traversal-control-{name}"
+        assert (
+            machine.succeed(request(f"/allowed/public/hello.txt?probe={marker}", "-f"))
+            == "allowed resource\n"
+        )
+        app.wait_until_succeeds(
+            f"journalctl -u backend -o cat | grep -F {marker}", timeout=T
+        )
+    backend_log = app.succeed("journalctl -u backend -o cat")
+    print(
+        "path-policy resource probes: "
+        + json.dumps(
+            [
+                {
+                    "path": path,
+                    "probe": marker,
+                    "status": code,
+                    "body": body,
+                    "backend_access": marker in backend_log,
+                }
+                for path, marker, code, body in probes
+            ]
+        )
+    )
+    assert all(
+        code == "400" and marker not in backend_log for _, marker, code, _ in probes
+    ), probes
+
+with subtest("independent path policies and explicit no-policy passthrough"):
+    for allowed_paths, denied_paths in (
+        ("^/allowed", ""),
+        ("", "^/allowed/private"),
+        ("", ""),
+    ):
+        app.succeed("systemctl stop tsnet-serve")
+        environment(allowed_paths=allowed_paths, denied_paths=denied_paths)
+        app.succeed("systemctl start tsnet-serve")
+        for machine in (direct, relay):
+            healthy(machine)
+            response = json.loads(machine.succeed(request("/allowed/", "-f")))
+            assert response["path"] == "/allowed/", response
+            assert (
+                machine.succeed(
+                    request("/allowed/public/%68ello.txt?ref=%2e%2e", "-f --path-as-is")
+                )
+                == "allowed resource\n"
+            )
+            status(machine, "/allowed/private/secret.txt", 403 if denied_paths else 200)
+            status(machine, "/outside.txt", 404 if allowed_paths else 200)
+            status(machine, "/", 404 if allowed_paths else 200)
+            for path, body in (
+                ("/allowed/public/../private/secret.txt", "private resource\n"),
+                ("/allowed/public/%2e%2e/private/secret.txt", "private resource\n"),
+                ("/allowed/../outside.txt", "outside resource\n"),
+                ("/allowed/%2e%2e/outside.txt", "outside resource\n"),
+            ):
+                code = machine.succeed(
+                    request(path, "--path-as-is -o /tmp/policy-body -w '%{http_code}'")
+                )
+                expected = "400" if allowed_paths or denied_paths else "200"
+                assert code == expected, (allowed_paths, denied_paths, path, code)
+                if expected == "200":
+                    assert machine.succeed("cat /tmp/policy-body") == body
+            if not allowed_paths and not denied_paths:
+                for path in (
+                    "/allowed/public/../echo?q=one%20two",
+                    "/allowed/public/%2E%2E/echo?q=one%20two",
+                    "/allowed//echo?q=one%20two",
+                ):
+                    response = json.loads(
+                        machine.succeed(request(path, "-f --path-as-is"))
+                    )
+                    assert response["path"] == path, response
+    app.succeed("systemctl stop tsnet-serve")
+    environment()
+    app.succeed("systemctl start tsnet-serve")
+    healthy(direct)
+    healthy(relay)
+
 with subtest("live user ACL revocation with positive control and recovery"):
     healthy(denied)
     policy(False)
@@ -248,6 +369,16 @@ with subtest("backend URL prefix and configuration precedence"):
         response = healthy(direct)
         expected = "/prefix/allowed?fixed=yes" if "/prefix" in backend else "/allowed"
         assert response["path"] == expected, response
+        for machine in (direct, relay):
+            response = json.loads(
+                machine.succeed(request("/allowed/%65cho/?q=one%20two", "-f"))
+            )
+            expected = (
+                "/prefix/allowed/%65cho/?fixed=yes&q=one%20two"
+                if "/prefix" in backend
+                else "/allowed/%65cho/?q=one%20two"
+            )
+            assert response["path"] == expected, response
 
 with subtest("HTTPS backends verify trust and hostname unless explicitly insecure"):
     headscale.succeed(

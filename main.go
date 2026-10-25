@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path"
 	"path/filepath"
 	"regexp"
 	"runtime/debug"
@@ -203,6 +204,18 @@ func makeProxyHandler(proxyTarget *url.URL) http.Handler {
 	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if regexAllowedPaths != nil || regexDeniedPaths != nil {
+			// Reject paths a backend could normalize into a different policy match.
+			cleanPath := path.Clean(r.URL.Path)
+			if strings.HasSuffix(r.URL.Path, "/") && cleanPath != "/" {
+				cleanPath += "/"
+			}
+			if r.URL.Path != cleanPath {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+		}
+
 		if regexDeniedPaths != nil && regexDeniedPaths.MatchString(r.URL.Path) {
 			w.WriteHeader(http.StatusForbidden)
 			return

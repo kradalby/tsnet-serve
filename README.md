@@ -45,6 +45,14 @@ Unmatched paths will return a 404 Not Found error.
 If denied paths are specified, those paths will be blocked.
 Matched paths will return a 403 Forbidden error.
 
+Rules match the percent-decoded request path before any backend URL prefix is added.
+Denied paths take precedence over allowed paths. When either rule is configured,
+paths containing `.` or `..` segments or repeated slashes return 400 Bad Request,
+including percent-encoded forms. This prevents backend path normalization from
+bypassing the rules. A single trailing slash is allowed. Accepted paths and queries
+are forwarded without normalization; with neither rule configured, this path check
+is disabled.
+
 You can specify a state directory using the `-state-dir` flag.
 This directory is used to store the Tailscale state.
 
@@ -155,7 +163,9 @@ Coverage in `nix/e2e.py` includes:
   DERP, including POST bodies, URL queries, forwarded client IP/protocol/host, and spoofed
   `X-Forwarded-For` replacement.
 - Allowed paths, denied-path precedence, encoded paths, and unmatched paths.
-  Denial checks include a working allowed request.
+  Raw and encoded traversal attempts use a normalizing file backend, with healthy
+  allowed controls and backend access checks over both transports. Allow-only,
+  deny-only, and no-policy cases cover trailing slashes and path/query preservation.
 - Live user ACL revocation against a tagged destination, an allowed-user
   control over both transports, and restoration of the denied user's access.
 - Established direct traffic during a control/DERP outage, followed by relay
