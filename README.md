@@ -120,3 +120,62 @@ if you have any improvements or bug fixes to suggest.
 ## License
 
 Licensed under the [MIT License](LICENSE).
+
+## Nix integration tests
+
+Build the application with `nix build .#default`. The `e2e` package runs a
+NixOS VM test against the pinned upstream Headscale `testkit` and
+`testkit-peer` modules. It requires Linux, working `/dev/kvm`, and a Nix builder
+with the `kvm` system feature:
+
+```shell
+nix build .#default -L
+nix build .#e2e -L
+```
+
+The application package uses the existing development nixpkgs pin. VMs use
+Headscale's independent nixpkgs pin, which supplies the NixOS options and Go
+version its kit requires. The VM service uses the actual application package,
+a dynamic non-root user, private persistent state, and systemd filesystem
+protection. `CAP_NET_ADMIN` lets tsnet reach the VLAN on a multihomed VM; without
+it tsnet binds to the default-route interface. This service is a test fixture,
+not a supported public NixOS module.
+
+The fixture advertises Headscale certificate domains and seeds tsnet's
+certificate cache with a certificate signed by a local test CA. Both tsnet and
+the requesting peers trust that CA explicitly. Requests use the application's
+unchanged `ListenTLS` path with hostname and certificate verification enabled.
+Headscale's self-signed DERP certificate is separate from the application CA.
+
+Coverage in `nix/e2e.py` includes:
+
+- Keyless login with local approval, rejected auth keys, reusable-key enrollment,
+  tagged service identity, and restart without a key preserving node identity.
+- MagicDNS hostname resolution and HTTPS over a proven direct path and forced
+  DERP, including POST bodies, URL queries, forwarded client IP/protocol/host, and spoofed
+  `X-Forwarded-For` replacement.
+- Allowed paths, denied-path precedence, encoded paths, and unmatched paths.
+  Denial checks include a working allowed request.
+- Live user ACL revocation against a tagged destination, an allowed-user
+  control over both transports, and restoration of the denied user's access.
+- Established direct traffic during a control/DERP outage, followed by relay
+  recovery. Funnel capability refusal followed by ordinary HTTPS recovery.
+- Backend port shorthand, host:port, full URL prefixes, environment precedence,
+  backend outages and recovery, verified HTTPS backends, hostname/CA rejection,
+  and the explicit `https+insecure` backend mode.
+- Invalid ports, Funnel port restrictions, backend schemes, regular
+  expressions, state paths, and environment values.
+
+Beyond tsnet's Funnel capability gate, the application does not consume custom
+application grants/capabilities. It does not call WhoIs, implement per-user HTTP
+authorization, or provide trusted user identity headers. Headscale supplies
+network policy, which tsnet enforces; the application enforces path rules.
+Tags are supplied through the auth key, not an application tag flag.
+
+Public ACME issuance/renewal remains outside this local fixture: cached
+certificates test HTTPS itself, without public DNS challenges. The pinned
+Headscale rejects the `funnel` node attribute, so successful Funnel enablement
+is not covered either. Public Funnel ingress additionally requires Tailscale's
+hosted infrastructure. Port validation and capability refusal are covered.
+Interactive login uses Headscale's CLI approval; it does not automate a browser
+or external identity provider.
