@@ -120,3 +120,11 @@ if you have any improvements or bug fixes to suggest.
 ## License
 
 Licensed under the [MIT License](LICENSE).
+
+## Nix integration tests
+
+On Linux with KVM, run `nix build .#checks.x86_64-linux.e2e -L`.
+The test uses Headscale's testkit to exercise enrollment, direct/DERP HTTPS,
+network policy, proxy behavior, and restart persistence with the unchanged app.
+Certificates come from a local test CA; public ACME and successful cloud Funnel
+ingress are not covered.
